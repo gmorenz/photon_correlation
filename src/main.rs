@@ -18,7 +18,7 @@ impl <'a> Iterator for PhotonIter<'a> {
         const T2WRAPAROUND_V2: u64 = 33554432;
 
         if self.data.len() == 0 { return None; }
-        
+
         let (new_data, val) = nom::le_u32(self.data).unwrap();
         self.data = new_data;
 
@@ -52,6 +52,74 @@ impl <'a> Iterator for PhotonIter<'a> {
         }
     }
 }
+
+
+impl <'a> PhotonIter<'a> {
+    pub fn new(data: &'a[u8]) -> PhotonIter {
+        PhotonIter {
+            data: data,
+            basetime: 0
+        }
+    }
+}
+
+
+#[derive(Clone, Copy)]
+struct FastPhotonIter<'a> {
+    data: &'a [u32],
+    basetime: u64
+}
+
+impl <'a> FastPhotonIter<'a> {
+    pub fn new(data: &'a[u8]) -> FastPhotonIter {
+        assert_eq!(data.len() % 4, 0, "Bad data length in FastPhotonIter");
+        assert_eq!(data.as_ptr() as usize % 4, 0, "Bad data allignment in FastPhotonIter");
+        // TODO: Assert we are on a little endian machine.
+
+        let data = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u32, data.len() / 4)
+        };
+
+        FastPhotonIter {
+            data: data,
+            basetime: 0
+        }
+    }
+}
+
+impl <'a> Iterator for FastPhotonIter<'a> {
+    type Item = (u64, bool);
+    fn next(&mut self) -> Option<(u64, bool)> {
+        const T2WRAPAROUND_V2: u64 = 33554432;
+
+        if self.data.len() == 0 { return None; }
+
+        // TODO: Check these both get optimized properly (they aren't).
+        loop {
+            let val = self.data[0];
+            self.data = &self.data[1..];
+
+            // TODO: Verify
+            let special = val >> 31;
+            let channel = (val >> 25) & 0b_11_1111;
+            let timetag = val & 0x01ff_ffff;
+
+            if special == 1 {
+                if channel == 0x3F && timetag != 0 {
+                    self.basetime += T2WRAPAROUND_V2 * timetag as u64;
+                    continue;
+                }
+                else {
+                    panic!("Something went wrong");
+                }
+            }
+            else {
+                return Some((self.basetime + timetag as u64, channel == 0))
+            }
+        }
+    }
+}
+
 
 fn strip_remaining_from_err<T>(val: IResult<&[u8], T>) -> IResult<&[u8], T> {
     fn strip_remaining_from_context(context: nom::Context<&[u8]>) -> nom::Context<&[u8]> {
@@ -145,10 +213,7 @@ fn main() {
     let record_type = header[&(b"TTResultFormat_TTTRRecType\0\0\0\0\0\0", -1)];
     assert_eq!(record_type.int(), 0x1010204, "We only parse HydraHarpT2 files for now");
 
-    let photons = PhotonIter {
-        data: i,
-        basetime: 0,
-    };
+    let photons = FastPhotonIter::new(i);
 
     // let mut i = 0;
     // for photon in photons {
