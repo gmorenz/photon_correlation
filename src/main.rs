@@ -6,14 +6,15 @@ mod header;
 
 use nom::{IResult, Err};
 
+#[derive(Clone, Copy)]
 struct PhotonIter<'a> {
     data: &'a [u8],
     basetime: u64
 }
 
 impl <'a> Iterator for PhotonIter<'a> {
-    type Item = u64;
-    fn next(&mut self) -> Option<u64> {
+    type Item = (u64, bool);
+    fn next(&mut self) -> Option<(u64, bool)> {
         const T2WRAPAROUND_V2: u64 = 33554432;
 
         if self.data.len() == 0 { return None; }
@@ -47,7 +48,7 @@ impl <'a> Iterator for PhotonIter<'a> {
             }
         }
         else {
-            Some(self.basetime + timetag as u64)
+            Some((self.basetime + timetag as u64, channel == 0))
         }
     }
 }
@@ -71,7 +72,44 @@ fn strip_remaining_from_err<T>(val: IResult<&[u8], T>) -> IResult<&[u8], T> {
     })
 }
 
-fn correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<Item=u64>) {
+fn cross_correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) {
+    use std::collections::VecDeque;
+    let max_time = bins.len() as u64 * bin_step;
+
+    let mut stored_photons_1 = VecDeque::new();
+    let mut stored_photons_2 = VecDeque::new();
+
+    let mut last_photon_1 = 0;
+    let mut last_photon_2 = 0;
+
+    for (photon, channel) in photons {
+        let stored_photons_this;
+        let stored_photons_them;
+        if channel {
+            stored_photons_this = &mut stored_photons_1;
+            stored_photons_them = &mut stored_photons_2;
+        }
+        else {
+            stored_photons_this = &mut stored_photons_2;
+            stored_photons_them = &mut stored_photons_1;
+        }
+
+        stored_photons_this.push_back(photon);
+        while !stored_photons_them.is_empty() && photon - stored_photons_them[0] >= max_time {
+            stored_photons_them.pop_front();
+        }
+
+        if photon > first_photon + max_time {
+            for &mut old_photon in stored_photons_them {
+                let delta = photon - old_photon;
+                let bin = delta / bin_step;
+                bins[bin as usize] += 1; 
+            }
+        }
+    }
+}
+
+fn auto_correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<Item=u64>) {
     use std::collections::VecDeque;
     let max_time = bins.len() as u64 * bin_step;
 
@@ -119,9 +157,16 @@ fn main() {
     //     println!("{}", photon);
     // }
 
+    let (first_photon, _) = {photons}.next().unwrap();
+    // let count = photons.count();
+    // for photon in photons.skip(count - 100) {
+    //     println!("{:?}", photon);
+    // }
+
+
     // Run a correlation with 1ns sized bins, over 1 microsecond.
     let mut bins = [0; 1000];
-    correlation(&mut bins, 1000, photons);
+    cross_correlation(&mut bins, 1000, photons, first_photon);
     for &b in &bins[..] {
         println!("{}", b);
     }
