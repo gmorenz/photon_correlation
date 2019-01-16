@@ -1,0 +1,10 @@
+[package]
+name = "play"
+version = "0.1.0"
+authors = ["Greg Morenz <morenzg@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+nom = { version="4.1.1", features=["verbose-errors"] }
+memmap = "0.7.0"
+arrayref = "0.3.5"
