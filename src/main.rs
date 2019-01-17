@@ -51,6 +51,7 @@ impl <'a> Iterator for PhotonIter<'a> {
             }
         }
         else {
+            assert!(channel < 2);
             Some((self.basetime + timetag as u64, channel == 0))
         }
     }
@@ -102,7 +103,6 @@ impl <'a> Iterator for FastPhotonIter<'a> {
             let val = self.data[0];
             self.data = &self.data[1..];
 
-            // TODO: Verify
             let special = val >> 31;
             let channel = (val >> 25) & 0b_11_1111;
             let timetag = val & 0x01ff_ffff;
@@ -143,15 +143,13 @@ fn strip_remaining_from_err<T>(val: IResult<&[u8], T>) -> IResult<&[u8], T> {
     })
 }
 
+#[inline(always)]
 fn cross_correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) {
     use std::collections::VecDeque;
     let max_time = bins.len() as u64 * bin_step;
 
     let mut stored_photons_1 = VecDeque::new();
     let mut stored_photons_2 = VecDeque::new();
-
-    let mut last_photon_1 = 0;
-    let mut last_photon_2 = 0;
 
     for (photon, channel) in photons {
         let stored_photons_this;
@@ -200,7 +198,7 @@ fn auto_correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<
     }
 }
 
-fn run_cross_correlation(num_bins: usize, bin_size: u64, filename: PathBuf, num_photons: Option<usize>) {
+fn run_cross_correlation(num_bins: usize, bin_size: u64, filename: PathBuf, num_photons: Option<usize>, start_time: u64, end_time: Option<u64>) {
     let file = std::fs::File::open("2018-11-24-ITK5nM-long_000.ptu").unwrap();
     let mmap = unsafe { memmap::MmapOptions::new().map(&file).unwrap() };
     let (i, header) = strip_remaining_from_err(header::parse(&mmap)).unwrap();
@@ -216,18 +214,35 @@ fn run_cross_correlation(num_bins: usize, bin_size: u64, filename: PathBuf, num_
     let record_type = header[&(b"TTResultFormat_TTTRRecType\0\0\0\0\0\0", -1)];
     assert_eq!(record_type.int(), 0x1010204, "We only parse HydraHarpT2 files for now");
 
-    let photons = FastPhotonIter::new(i);
-
-    let (first_photon, _) = {photons}.next().unwrap();
-
     let mut bins = vec![0; num_bins];
+
+
+    let mut photons = FastPhotonIter::new(i);
+    
+    // Skip photons until the start time.
+    while photons.clone().next().expect("No photons after start time").0 < start_time {
+        photons.next();
+    }
+
+    let (first_photon, _) = photons.clone().next().unwrap();
+
 
     if let Some(num_photons) = num_photons {
         // TODO: num_photons *really* wants to be a u64, but `.take` expects a usize.
-        cross_correlation(&mut bins, bin_size, photons.take(num_photons), first_photon);
+        if let Some(end_time) = end_time {
+            cross_correlation(&mut bins, bin_size, photons.take(num_photons).take_while(|p| end_time > p.0), first_photon);
+        }
+        else {
+            cross_correlation(&mut bins, bin_size, photons.take(num_photons), first_photon);
+        }
     }
     else {
-        cross_correlation(&mut bins, bin_size, photons, first_photon);
+        if let Some(end_time) = end_time {
+            cross_correlation(&mut bins, bin_size, photons.take_while(|p| end_time > p.0), first_photon);
+        }
+        else {
+            cross_correlation(&mut bins, bin_size, photons, first_photon);
+        }
     }
     
     for &b in &bins[..] {
@@ -236,7 +251,6 @@ fn run_cross_correlation(num_bins: usize, bin_size: u64, filename: PathBuf, num_
 
 }
 
-
 #[derive(Debug, StructOpt)]
 #[structopt(name = "photon_correlation", about = "Run cross correlation on HydraHarpT2 files")]
 struct Opt {
@@ -244,14 +258,20 @@ struct Opt {
     #[structopt(short = "n", long = "num_timestep", default_value = "100")]
     num_timestep: usize,
     /// Length of each timestep.
-    #[structopt(short = "s", long = "timestep_size", default_value = "1000")]
-    timestep_size: u64,
+    #[structopt(short = "T", long = "cor_time", default_value = "1000000")]
+    cor_time: u64,
     /// Input file
     #[structopt(parse(from_os_str))]
     input: PathBuf,
     /// Truncate file to this number of photons
     #[structopt(long="num_photons")]
     num_photons: Option<usize>,
+    /// Start Time
+    #[structopt(short = "s", long="start_time", default_value = "0")]
+    start_time: u64,
+    /// End Time
+    #[structopt(short = "s", long="end_time")]
+    end_time: Option<u64>,
 }
 
 fn main() {
@@ -259,8 +279,10 @@ fn main() {
     
     run_cross_correlation(
         opt.num_timestep,
-        opt.timestep_size,
+        opt.cor_time / opt.num_timestep as u64,
         opt.input,
-        opt.num_photons
+        opt.num_photons,
+        opt.start_time,
+        opt.end_time,
     );
 }
