@@ -1,10 +1,13 @@
 
 #[macro_use] extern crate arrayref;
 #[macro_use] extern crate nom;
+#[macro_use] extern crate structopt;
 
 mod header;
 
+use structopt::StructOpt;
 use nom::{IResult, Err};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy)]
 struct PhotonIter<'a> {
@@ -197,7 +200,7 @@ fn auto_correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<
     }
 }
 
-fn main() {
+fn run_cross_correlation(num_bins: usize, bin_size: u64, filename: PathBuf, num_photons: Option<usize>) {
     let file = std::fs::File::open("2018-11-24-ITK5nM-long_000.ptu").unwrap();
     let mmap = unsafe { memmap::MmapOptions::new().map(&file).unwrap() };
     let (i, header) = strip_remaining_from_err(header::parse(&mmap)).unwrap();
@@ -207,7 +210,7 @@ fn main() {
 
     assert_eq!(resolution, 1e-12, "We expect resolution in picoseconds");
 
-    println!("Number of records: {}", num_records);
+    // println!("Number of records: {}", num_records);
     assert!(num_records > 0);
 
     let record_type = header[&(b"TTResultFormat_TTTRRecType\0\0\0\0\0\0", -1)];
@@ -215,29 +218,49 @@ fn main() {
 
     let photons = FastPhotonIter::new(i);
 
-    // let mut i = 0;
-    // for photon in photons {
-    //     i += 1;
-    //     if i > 10000 { break }
-    //     println!("{}", photon);
-    // }
-
     let (first_photon, _) = {photons}.next().unwrap();
-    // let count = photons.count();
-    // for photon in photons.skip(count - 100) {
-    //     println!("{:?}", photon);
-    // }
 
+    let mut bins = vec![0; num_bins];
 
-    // Run a correlation with 1ns sized bins, over 1 microsecond.
-    let mut bins = [0; 1000];
-    cross_correlation(&mut bins, 1000, photons, first_photon);
+    if let Some(num_photons) = num_photons {
+        // TODO: num_photons *really* wants to be a u64, but `.take` expects a usize.
+        cross_correlation(&mut bins, bin_size, photons.take(num_photons), first_photon);
+    }
+    else {
+        cross_correlation(&mut bins, bin_size, photons, first_photon);
+    }
+    
     for &b in &bins[..] {
         println!("{}", b);
     }
 
-    // let (i, ()) = strip_remaining_from_err(read_ht2_records(i, resolution, num_records as u64)).unwrap();
-    // assert!(i.len() == 0, "Output remaining after reading records");
-    // println!("{:#?}", header);
-    // println!("{} {} {} {}", mmap.len(), r.0.len(), r.1.len(), String::from_utf8_lossy(r.1));
+}
+
+
+#[derive(Debug, StructOpt)]
+#[structopt(name = "photon_correlation", about = "Run cross correlation on HydraHarpT2 files")]
+struct Opt {
+    /// Number of timesteps to cross correlate over.
+    #[structopt(short = "n", long = "num_timestep", default_value = "100")]
+    num_timestep: usize,
+    /// Length of each timestep.
+    #[structopt(short = "s", long = "timestep_size", default_value = "1000")]
+    timestep_size: u64,
+    /// Input file
+    #[structopt(parse(from_os_str))]
+    input: PathBuf,
+    /// Truncate file to this number of photons
+    #[structopt(long="num_photons")]
+    num_photons: Option<usize>,
+}
+
+fn main() {
+    let opt = Opt::from_args();
+    
+    run_cross_correlation(
+        opt.num_timestep,
+        opt.timestep_size,
+        opt.input,
+        opt.num_photons
+    );
 }

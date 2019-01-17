@@ -110,7 +110,7 @@ fn parse_tags(mut i: &[u8]) -> IResult<&[u8], Header> {
         let (i_new, value) = parse_tag_value(i)?;
         i = i_new;
 
-        println!("Header {}: {} {} : {:?}", j, String::from_utf8_lossy(tag_ident), tag_index, value);
+        // println!("Header {}: {} {} : {:?}", j, String::from_utf8_lossy(tag_ident), tag_index, value);
         header.insert((tag_ident, tag_index), value);
 
         if tag_ident == b"Header_End\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" {
