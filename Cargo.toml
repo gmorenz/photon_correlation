@@ -1,5 +1,5 @@
 [package]
-name = "play"
+name = "photon_correlation"
 version = "0.1.0"
 authors = ["Greg Morenz <morenzg@gmail.com>"]
 edition = "2018"

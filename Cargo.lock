@@ -94,7 +94,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "play"
+name = "photon_correlation"
 version = "0.1.0"
 dependencies = [
  "arrayref 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
