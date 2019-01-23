@@ -1,15 +1,17 @@
 
 #[macro_use] extern crate arrayref;
 #[macro_use] extern crate nom;
-#[macro_use] extern crate structopt;
 
 mod header;
 
 use structopt::StructOpt;
 use nom::{IResult, Err};
 use std::path::PathBuf;
+use std::io::{stdout, Write};
+use std::fs::File;
+use std::thread;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PhotonIter<'a> {
     data: &'a [u8],
     basetime: u64
@@ -25,10 +27,9 @@ impl <'a> Iterator for PhotonIter<'a> {
         let (new_data, val) = nom::le_u32(self.data).unwrap();
         self.data = new_data;
 
-        // TODO: Verify
-        let special = val >> 31;
-        let channel = (val >> 25) & 0b_11_1111;
-        let timetag = val & 0x01ff_ffff;
+        let special: u32 = val >> 31;
+        let channel: u32 = (val >> 25) & 0b_11_1111;
+        let timetag: u32 = val & 0x01ff_ffff;
 
         if special == 1 {
             if channel == 0x3F {
@@ -68,7 +69,7 @@ impl <'a> PhotonIter<'a> {
 }
 
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FastPhotonIter<'a> {
     data: &'a [u32],
     basetime: u64
@@ -143,15 +144,16 @@ fn strip_remaining_from_err<T>(val: IResult<&[u8], T>) -> IResult<&[u8], T> {
     })
 }
 
+#[cfg(target_feature="avx2")]
 fn parallel_asymmetric_cross_correlation(bins_forward: &mut [u64], bins_backwards: &mut [u64], bin_step: u64, photons: impl Iterator<Item=(u64, bool)> + Clone + Send, first_photon: u64) {
     fn thread(bins: &mut [u64], bin_step: u64, us: bool, photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) {
         use std::collections::VecDeque;
 
-        let max_time = bins.len() as u64 * bin_step;
+        let max_time: u64 = bins.len() as u64 * bin_step;
         let mut stored_photons = VecDeque::new();
         // let mut i = 0;
 
-        let mut stored_len = 0;
+        let mut stored_len: u64 = 0;
 
         for (photon, channel) in photons {
             if channel == us {
@@ -169,11 +171,11 @@ fn parallel_asymmetric_cross_correlation(bins_forward: &mut [u64], bins_backward
 
             if photon > first_photon + max_time {
                 for &old_photon in &stored_photons {
-                    stored_len += stored_photons.len();
+                    stored_len += stored_photons.len() as u64;
 
-                    let delta = photon - old_photon;
-                    let bin = delta / bin_step;
-                    bins[bin as usize] += 1;
+                    let delta: u64 = photon - old_photon;
+                    let bin: u64 = delta / bin_step;
+                    bins[bin as usize] += 1u64;
                 }
             }
         }
@@ -181,7 +183,7 @@ fn parallel_asymmetric_cross_correlation(bins_forward: &mut [u64], bins_backward
         println!("stored len: {}", stored_len);
     }
 
-    // Note: Be careful about what happens with simultaneous photons.
+    // Note (Bug): Simultaneous photons counted twice.
 
     crossbeam_utils::thread::scope(|s| {
         let photons1 = photons.clone();
@@ -192,11 +194,11 @@ fn parallel_asymmetric_cross_correlation(bins_forward: &mut [u64], bins_backward
 
         // Thread 2:
         thread(bins_backwards, bin_step, false, photons, first_photon);
-    });
+    }).unwrap();
 }
 
 #[inline(always)]
-fn asymmetric_cross_correlation(bins_forward: &mut [u64], bins_backwards: &mut [u64], bin_step: u64, mut photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) {
+fn asymmetric_cross_correlation(bins_forward: &mut [u64], bins_backwards: &mut [u64], bin_step: u64, photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) {
     use std::collections::VecDeque;
     assert_eq!(bins_forward.len(), bins_backwards.len());
     let max_time = bins_forward.len() as u64 * bin_step;
@@ -225,16 +227,16 @@ fn asymmetric_cross_correlation(bins_forward: &mut [u64], bins_backwards: &mut [
             let bins = if channel { &mut *bins_forward } else { &mut *bins_backwards };
 
             for &mut old_photon in stored_photons_them {
-                let delta = photon - old_photon;
-                let bin = delta / bin_step;
-                bins[bin as usize] += 1;
+                let delta: u64 = photon - old_photon;
+                let bin: u64 = delta / bin_step;
+                bins[bin as usize] += 1u64;
             }
         }
     }
 }
 
 #[inline(always)]
-fn symmetric_cross_correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) {
+fn symmetric_cross_correlation(bins: &mut [u64], bin_step: u64, photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) {
     use std::collections::VecDeque;
     let max_time = bins.len() as u64 * bin_step;
 
@@ -260,15 +262,15 @@ fn symmetric_cross_correlation(bins: &mut [u64], bin_step: u64, mut photons: imp
 
         if photon > first_photon + max_time {
             for &mut old_photon in stored_photons_them {
-                let delta = photon - old_photon;
-                let bin = delta / bin_step;
-                bins[bin as usize] += 1;
+                let delta: u64 = photon - old_photon;
+                let bin: u64 = delta / bin_step;
+                bins[bin as usize] += 1u64;
             }
         }
     }
 }
 
-fn auto_correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<Item=u64>) {
+fn auto_correlation(bins: &mut [u64], bin_step: u64, photons: impl Iterator<Item=u64>) {
     use std::collections::VecDeque;
     let max_time = bins.len() as u64 * bin_step;
 
@@ -278,8 +280,8 @@ fn auto_correlation(bins: &mut [u64], bin_step: u64, mut photons: impl Iterator<
         while !stored_photons.is_empty() && photon - stored_photons[0] >= max_time {
             let old_photon = stored_photons.pop_front().unwrap();
             for &remaining_photon in &stored_photons {
-                let delta = remaining_photon - old_photon;
-                let bin = delta / bin_step;
+                let delta: u64 = remaining_photon - old_photon;
+                let bin: u64 = delta / bin_step;
                 bins[bin as usize] += 1;
             }
         }
@@ -345,16 +347,123 @@ macro_rules! tree_of_if {
     };
 }
 
-fn run_cross_correlation(num_bins: usize, bin_size: u64, 
-        filename: PathBuf, num_photons: Option<usize>, 
-        start_time: u64, end_time: Option<u64>,
-        parallel: bool, quiet: bool) {
-    let file = std::fs::File::open("2018-11-24-ITK5nM-long_000.ptu").unwrap();
+fn validate_file(buffer: &[u8]) {
+    let mut photon_iter = PhotonIter::new(buffer);
+    let mut equal_count: u64 = 0;
+    let mut out_of_order: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        let photon = photon_iter.next().unwrap();
+        let photon2 = if let Some(p) = photon_iter.clone().next() { p } else { break };
+
+
+
+        if photon2 < photon {
+            println!("Out of order: {}", i);
+            out_of_order += 1;
+        }
+        if photon == photon2 {
+            let pdl = photon_iter.data.len();
+            let range = if pdl > 50 { 0.. 50 } else { 0.. pdl };
+            println!("Equal: {} - {} / {} ({:?})", i, pdl, buffer.len(), &photon_iter.data[range]);
+            equal_count += 1;
+        }
+        i += 1;
+
+        if equal_count + out_of_order > 100 {
+            break;
+        }
+    }
+
+    if out_of_order > 0 || equal_count > 0 {
+        panic!("Out of order photons: {}\nEqual Timestamped Photons: {}", out_of_order, equal_count);
+    }
+
+    println!("File validated");
+}
+
+#[derive(Clone, Debug, StructOpt)]
+#[structopt(name = "photon_correlation", about = "Run cross correlation on HydraHarpT2 files")]
+struct Opt {
+    /// Cross correlate, takes output file as argument ('-' for stdout)
+    #[structopt(short = "c", long = "cross-correlate")]
+    cross_correlate: Option<PathBuf>,
+    /// Auto correlate, takes output file as argument ('-' for stdout)
+    #[structopt(short = "c", long = "auto-correlate")]
+    auto_correlate: Option<PathBuf>,
+    /// Print header and number of photons, takes output file as argument ('-' for stdout)
+    #[structopt(short = "m", long = "metadata")]
+    metadata: Option<PathBuf>,
+
+    /// Input file
+    #[structopt(parse(from_os_str))]
+    input: PathBuf,
+
+    /// Number of timesteps to cross correlate over.
+    #[structopt(short = "n", long = "num_timestep", default_value = "1000")]
+    num_timestep: usize,
+    /// Length of each timestep.
+    #[structopt(short = "T", long = "cor_time", default_value = "10000000")]
+    cor_time: u64,
+
+    /// Truncate file to this number of photons
+    #[structopt(long="num_photons")]
+    num_photons: Option<usize>,
+    /// Start Time
+    #[structopt(short = "s", long="start_time", default_value = "0")]
+    start_time: u64,
+    /// End Time
+    #[structopt(short = "e", long="end_time")]
+    end_time: Option<u64>,
+
+    /// Don't run in parallel
+    #[structopt(long="sequential")]
+    sequential: bool,
+    /// Validate file is like we expect before running (takes a few minutes).
+    #[structopt(long="validate-file")]
+    validate_file: bool,
+    /// Validate correlation outputs by running slower and faster version of code
+    /// and make sure they get the same output (slow).
+    #[structopt(long="validate-correlation")]
+    validate_correlation: bool,
+}
+
+fn get_output(path: &PathBuf) -> Box<Write + Send> {
+    use std::path::Path;
+    if path == Path::new("-") {
+        Box::new(stdout())
+    }
+    else {
+        Box::new(File::create(path).expect("Output file doesn't exist"))
+    }
+}
+
+fn static_ref<T>(v: T) -> &'static T {
+    let b = Box::new(v);
+    let r = unsafe{ std::mem::transmute::<&T, &'static T>(&b) };
+    std::mem::forget(b);
+    r
+}
+
+fn main() {
+    let opt = Opt::from_args();
+    let mut thread_handles = vec![];
+
+    let file = std::fs::File::open(&opt.input).unwrap();
     let mmap = unsafe { memmap::MmapOptions::new().map(&file).unwrap() };
+    let mmap = static_ref(mmap);
     let (i, header) = strip_remaining_from_err(header::parse(&mmap)).unwrap();
 
-    let num_records = header[&(b"TTResult_NumberOfRecords\0\0\0\0\0\0\0\0", -1)].int();
-    let resolution = header[&(b"MeasDesc_GlobalResolution\0\0\0\0\0\0\0", -1)].float();
+    if opt.validate_file {
+        thread_handles.push(
+            thread::spawn(move || {
+                validate_file(i);
+            })
+        );
+    }
+
+    let num_records: i64 = header[&(b"TTResult_NumberOfRecords\0\0\0\0\0\0\0\0", -1)].int();
+    let resolution: f64 = header[&(b"MeasDesc_GlobalResolution\0\0\0\0\0\0\0", -1)].float();
 
     assert_eq!(resolution, 1e-12, "We expect resolution in picoseconds");
 
@@ -364,102 +473,121 @@ fn run_cross_correlation(num_bins: usize, bin_size: u64,
     let record_type = header[&(b"TTResultFormat_TTTRRecType\0\0\0\0\0\0", -1)];
     assert_eq!(record_type.int(), 0x1010204, "We only parse HydraHarpT2 files for now");
 
-    let mut bins_forward = vec![0; num_bins];
-    let mut bins_backwards = vec![0; num_bins];
-
-
     let mut photons = FastPhotonIter::new(i);
 
     // Skip photons until the start time.
-    while photons.clone().next().expect("No photons after start time").0 < start_time {
+    while photons.clone().next().expect("No photons after start time").0 < opt.start_time {
         photons.next();
     }
 
     let (first_photon, _) = photons.clone().next().unwrap();
 
-    // tree_of_if!(
-    //     (photons => asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons, first_photon))
+    let bin_size = opt.cor_time / opt.num_timestep as u64;
 
-    //     // TODO: num_photons *really* wants to be a u64, but `.take` expects a usize.
-    //     if let Some(num_photons) = (num_photons) {
-    //         photons.take(num_photons)
-    //     }
-
-    //     if let Some(end_time) = (end_time) {
-    //         photons.take_while(|p| end_time > p.0)
-    //     }
-    // );
+    if opt.auto_correlate.is_some() && opt.metadata.is_some() {
+        assert_ne!(opt.auto_correlate, opt.metadata, "Output files must differ");
+    }
+    if opt.cross_correlate.is_some() && opt.metadata.is_some() {
+        assert_ne!(opt.cross_correlate, opt.metadata, "Output files must differ");
+    }
+    if opt.cross_correlate.is_some() && opt.auto_correlate.is_some() {
+        assert_ne!(opt.cross_correlate, opt.auto_correlate, "Output files must differ");
+    }
 
     tree_of_if!(
         // TODO: num_photons *really* wants to be a u64, but `.take` expects a usize.
-        if let Some(num_photons) = (num_photons) {
+        if let Some(num_photons) = (opt.num_photons) {
             let photons = photons.take(num_photons);
         }
 
-        if let Some(end_time) = (end_time) {
-            let photons = photons.take_while(|p| end_time > p.0);
+        if let Some(end_time) = (opt.end_time) {
+            let photons = photons.take_while(move |p| end_time > p.0);
         }
 
-        if parallel {
-            parallel_asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons, first_photon)
-        }
-        else {
-            asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons, first_photon)
+        {
+            if let Some(ref path) = &opt.metadata {
+                let mut meta_output = get_output(&path);
+
+                // Unclear if it would be better to do this as part of other passes. One hopes that running it in parallel
+                // ends up preloading photons for other passes (but if it gets too far ahead it will be bad).
+                let photons = photons.clone();
+                thread_handles.push(
+                    thread::spawn(move || {
+                        header::write_header(&mut *meta_output, header);
+                        let mut count: u64 = 0;
+                        let mut last: u64 = 0;
+                        for (photon, _) in photons {
+                            count += 1;
+                            last = photon;
+                        }
+                        writeln!(meta_output, "Photon count: {}", count).unwrap();
+                        writeln!(meta_output, "Last photon: {}", last).unwrap();
+                    })
+                );
+            }
+
+            if let Some(path) = &opt.auto_correlate {
+                let mut auto_output = get_output(&path);
+                let photons = photons.clone(); 
+                let opt = opt.clone();
+                thread_handles.push(
+                    thread::spawn(move || {
+                        eprintln!("WARNING: Auto correlate probably doesn't do what you want, we ignore channel information right now instead of autocorrelating each channel");
+                        let mut bins: Vec<u64> = vec![0; opt.num_timestep];
+                        let photons = photons.map(|(time, _channel)| time);
+                        auto_correlation(&mut bins, bin_size, photons);
+
+                        let mut bin_start = 0;
+                        for &b in &bins {
+                            writeln!(auto_output, "{} {}", bin_start, b).unwrap();
+                            bin_start += bin_size;
+                        }
+                    })
+                );
+            }
+
+            if let Some(path) = &opt.cross_correlate {
+                let mut cross_output = get_output(&path);
+
+                let mut bins_forward: Vec<u64> = vec![0; opt.num_timestep];
+                let mut bins_backwards: Vec<u64> = vec![0; opt.num_timestep];
+
+                if !opt.sequential {
+                    parallel_asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons.clone(), first_photon)
+                }
+                else {
+                    asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons.clone(), first_photon)
+                }
+
+                let mut bin_start: i64 = - (bin_size as i64 * opt.num_timestep as i64);
+                for &b in bins_backwards.iter().rev() {
+                    writeln!(cross_output, "{} {}", bin_start, b).unwrap();
+                    bin_start += bin_size as i64;
+                }
+
+                assert_eq!(bin_start, 0);
+
+                for &b in &bins_forward[..] {
+                    writeln!(cross_output, "{} {}", bin_start, b).unwrap();
+                    bin_start += bin_size as i64;
+                }
+
+
+
+                if opt.validate_correlation {
+                    let mut bins: Vec<u64> = vec![0; opt.num_timestep];
+                    symmetric_cross_correlation(&mut bins, bin_size, photons, first_photon);
+                    for i in 0.. opt.num_timestep {
+                        // Note: This *will* fail if there are two simultaneous photons, because they
+                        // are currently double counted. I'll consider that a feature for now.
+                        assert_eq!(bins[i], bins_forward[i] + bins_backwards[i]);
+                    } 
+                }
+            }
         }
     );
 
-    if !quiet {
-        for &b in &bins_backwards[..] {
-            println!("{}", b);
-        }
-
-        for &b in &bins_forward[..] {
-            println!("{}", b);
-        }
+    for handle in thread_handles {
+        handle.join().unwrap();
     }
-
-}
-
-#[derive(Debug, StructOpt)]
-#[structopt(name = "photon_correlation", about = "Run cross correlation on HydraHarpT2 files")]
-struct Opt {
-    /// Number of timesteps to cross correlate over.
-    #[structopt(short = "n", long = "num_timestep", default_value = "1000")]
-    num_timestep: usize,
-    /// Length of each timestep.
-    #[structopt(short = "T", long = "cor_time", default_value = "10000000")]
-    cor_time: u64,
-    /// Input file
-    #[structopt(parse(from_os_str))]
-    input: PathBuf,
-    /// Truncate file to this number of photons
-    #[structopt(long="num_photons")]
-    num_photons: Option<usize>,
-    /// Start Time
-    #[structopt(short = "s", long="start_time", default_value = "0")]
-    start_time: u64,
-    /// End Time
-    #[structopt(short = "s", long="end_time")]
-    end_time: Option<u64>,
-    /// Run in parallel
-    #[structopt(short = "p", long="parallel")]
-    parallel: bool,
-    /// Don't print results
-    #[structopt(short = "q", long="quiet")]
-    quiet: bool,
-}
-
-fn main() {
-    let opt = Opt::from_args();
-
-    run_cross_correlation(
-        opt.num_timestep,
-        opt.cor_time / opt.num_timestep as u64,
-        opt.input,
-        opt.num_photons,
-        opt.start_time,
-        opt.end_time,
-        opt.parallel,
-        opt.quiet,
-    );
 }

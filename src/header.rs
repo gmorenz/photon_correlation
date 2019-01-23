@@ -1,3 +1,7 @@
+// Unfortunately there is some unreachable code in a macro that gives a warning otherwise,
+// and doesn't seem to be able to be disabled by putting this just on that macro.
+#![allow(unreachable_code)]
+
 // Used for use in macros that don't accept ::
 use nom::{le_i64, le_u64, le_f64};
 // Used for writing parsers as functions
@@ -15,6 +19,7 @@ pub enum TagValue<'a> {
     Float(f64),
     TDateTime(f64),
     /// Python decoding for this is nonsense, panic!
+    #[allow(dead_code)]
     Float8Array,
     AnsiString(&'a [u8]),
     WideString(&'a [u8]),
@@ -99,7 +104,7 @@ named!(parse_tag_value<&[u8], TagValue>,
 
 fn parse_tags(mut i: &[u8]) -> IResult<&[u8], Header> {
     let mut header = Header::new();
-    for j in 0.. {
+    loop {
         let (i_new, tag_ident) = take!(i, 32)?;
         i = i_new;
         let tag_ident = array_ref!(tag_ident, 0, 32);
@@ -117,7 +122,6 @@ fn parse_tags(mut i: &[u8]) -> IResult<&[u8], Header> {
             return Ok((i, header));
         }
     }
-    panic!("j overflow");
 }
 
 named!(pub parse<&[u8], Header>,
@@ -130,3 +134,19 @@ named!(pub parse<&[u8], Header>,
         (header)
     )
 );
+
+pub fn write_header(output: &mut std::io::Write, headers: Header) {
+    for (tag, value) in headers {
+        let value_string = match value {
+            TagValue::AnsiString(x) => String::from_utf8_lossy(x).to_string(),
+            _ => format!("{:?}", value),
+        };
+
+        let tag_string = match tag {
+            (x, -1) => String::from_utf8_lossy(x).to_string(),
+            (x, i) => format!("{} ({})", String::from_utf8_lossy(x), i),
+        };
+
+        writeln!(output, "{}: {}", tag_string, value_string).unwrap();
+    }
+}
