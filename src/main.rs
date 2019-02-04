@@ -289,31 +289,6 @@ fn auto_correlation(bins: &mut [u64], bin_step: u64, photons: impl Iterator<Item
         stored_photons.push_back(photon);
     }
 }
-
-// // Thanks /u/DroidLogician for help with this macro
-// // https://www.reddit.com/r/rust/comments/aft2h3/hey_rustaceans_got_an_easy_question_ask_here_32019/eeaks2l/
-// macro_rules! tree_of_if {
-//     // if we're out of patterns, call `f` with the iterator we've constructed
-//     (($iter:ident => $use_iter:expr)) => {
-//         $use_iter
-//     };
-//     (
-//         // we have to define the identifier used for the iterator because of hygiene
-//         // defining the identifier of the function is just for reusability
-//         ($iter:ident => $use_iter:expr)
-//         // expressions cannot be followed by blocks in macros
-//         if let $pat:pat = ($expr:expr) $new_iter:block $($rest:tt)*
-//     ) => {
-//             if let $pat = $expr {
-//             let $iter = $new_iter;
-//             // we recurse with the remaining patterns in both cases
-//                 tree_of_if!(($iter => $use_iter) $($rest)*)
-//             } else {
-//                 tree_of_if!(($iter => $use_iter) $($rest)*)
-//             }
-//     };
-// }
-
 // Thanks /u/DroidLogician for help with this macro
 // https://www.reddit.com/r/rust/comments/aft2h3/hey_rustaceans_got_an_easy_question_ask_here_32019/eeaks2l/
 macro_rules! tree_of_if {
@@ -389,7 +364,7 @@ struct Opt {
     #[structopt(short = "c", long = "cross-correlate")]
     cross_correlate: Option<PathBuf>,
     /// Auto correlate, takes output file as argument ('-' for stdout)
-    #[structopt(short = "c", long = "auto-correlate")]
+    #[structopt(short = "a", long = "auto-correlate")]
     auto_correlate: Option<PathBuf>,
     /// Print header and number of photons, takes output file as argument ('-' for stdout)
     #[structopt(short = "m", long = "metadata")]
@@ -415,6 +390,10 @@ struct Opt {
     /// End Time
     #[structopt(short = "e", long="end_time")]
     end_time: Option<u64>,
+
+    /// Print progress every n photons.
+    #[structopt(long = "progress")]
+    progress: Option<u64>,
 
     /// Don't run in parallel
     #[structopt(long="sequential")]
@@ -502,6 +481,16 @@ fn main() {
 
         if let Some(end_time) = (opt.end_time) {
             let photons = photons.take_while(move |p| end_time > p.0);
+        }
+
+        if let Some(progress_num) = (opt.progress) {
+            let mut count = 0;
+            let photons = photons.inspect(move |_| {
+                if count % progress_num == 0 {
+                    println!("Processed {} photons", count);
+                };
+                count += 1
+            });
         }
 
         {
