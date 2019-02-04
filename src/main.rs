@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::io::{stdout, Write};
 use std::fs::File;
 use std::thread;
+use std::collections::VecDeque;
 
 #[derive(Clone)]
 struct PhotonIter<'a> {
@@ -270,6 +271,148 @@ fn symmetric_cross_correlation(bins: &mut [u64], bin_step: u64, photons: impl It
     }
 }
 
+#[inline(always)]
+fn approximate_symmetric_cross_correlation(bin_count: u64, bin_step: u64, photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) -> Vec<u64> {
+    let mut chan_1_bins = VecDeque::with_capacity(bin_count as usize);
+    let mut chan_2_bins = VecDeque::with_capacity(bin_count as usize);
+
+    for _ in 0.. bin_count {
+        chan_1_bins.push_back(0u64);
+        chan_2_bins.push_back(0u64);
+    }
+
+    let mut xcorr_bins = vec![0u64; bin_count as usize];
+
+    let mut end_last_bin = first_photon + bin_step;
+    for (photon, channel) in photons {
+        let us;
+        let them;
+        if channel {
+            us = &mut chan_1_bins;
+            them = &mut chan_2_bins;
+        }
+        else {
+            us = &mut chan_2_bins;
+            them = &mut chan_1_bins;
+        }
+
+        if photon < end_last_bin {
+            // Still in existing bin, just add it.
+            *us.back_mut().unwrap() += 1;
+            continue;
+        }
+
+        // Interesting case, we calculate cross correlate for events in first bins with other events,
+        // then we remove the first bin and add a new last bin.
+
+        loop {
+            end_last_bin += bin_step;
+
+            let b0 = us.front().unwrap();
+            for (i, bin) in them.iter().enumerate() {
+                xcorr_bins[i] += b0 * bin;
+            }
+            let b0 = them.front().unwrap();
+            for (i, bin) in us.iter().enumerate() {
+                xcorr_bins[i] += b0 * bin;
+            }
+
+            us.pop_front();
+            them.pop_front();
+
+            if photon >= end_last_bin {
+                us.push_back(0);
+                them.push_back(0);
+            }
+            else {
+                us.push_back(1);
+                them.push_back(0);
+                break;
+            }
+        }
+    }
+
+    xcorr_bins[0] /= 2;
+    xcorr_bins
+}
+
+#[inline(always)]
+fn approximate_asymmetric_cross_correlation(bin_count: u64, bin_step: u64, photons: impl Iterator<Item=(u64, bool)>, first_photon: u64) -> (Vec<u64>, Vec<u64>) {
+    let mut chan_1_bins = VecDeque::with_capacity(bin_count as usize);
+    let mut chan_2_bins = VecDeque::with_capacity(bin_count as usize);
+
+    for _ in 0.. bin_count {
+        chan_1_bins.push_back(0u64);
+        chan_2_bins.push_back(0u64);
+    }
+
+    let mut xcorr_bins_forwards = vec![0u64; bin_count as usize];
+    let mut xcorr_bins_backwards = vec![0u64; bin_count as usize];
+
+    let mut end_last_bin = first_photon + bin_step;
+    for (photon, channel) in photons {
+        let (us, them, us_xcorr, them_xcorr);
+        if channel {
+            us = &mut chan_1_bins;
+            us_xcorr = &mut xcorr_bins_forwards;
+            them = &mut chan_2_bins;
+            them_xcorr = &mut xcorr_bins_backwards;
+        }
+        else {
+            us = &mut chan_2_bins;
+            us_xcorr = &mut xcorr_bins_backwards;
+            them = &mut chan_1_bins;
+            them_xcorr = &mut xcorr_bins_forwards;
+        }
+
+        if photon < end_last_bin {
+            // Still in existing bin, just add it.
+            *us.back_mut().unwrap() += 1;
+            continue;
+        }
+
+        // Interesting case, we calculate cross correlate for events in first bins with other events,
+        // then we remove the first bin and add a new last bin.  Except we do this in a loop because we
+        // might have to do it multiple times.
+
+        loop {
+            end_last_bin += bin_step;
+
+            let b0 = us.front().unwrap();
+            // print!("\tb0 us: {}\t\t", b0);
+            assert_eq!(them.len(), bin_count as usize);
+            for (i, bin) in them.iter().enumerate() {
+                us_xcorr[i] += b0 * bin;
+            }
+            let b0 = them.front().unwrap();
+            // println!("bo them: {}", b0);
+            assert_eq!(us.len(), bin_count as usize);
+            for (i, bin) in us.iter().enumerate() {
+                them_xcorr[i] += b0 * bin;
+            }
+
+            us.pop_front();
+            them.pop_front();
+
+            if photon >= end_last_bin {
+                us.push_back(0);
+                them.push_back(0);
+            }
+            else {
+                us.push_back(1);
+                them.push_back(0);
+                break;
+            }
+        }
+    }
+
+    assert_eq!(xcorr_bins_backwards[0], xcorr_bins_forwards[0]);
+    xcorr_bins_backwards.reverse();
+    xcorr_bins_backwards.pop();
+
+    (xcorr_bins_backwards, xcorr_bins_forwards)
+}
+
 fn auto_correlation(bins: &mut [u64], bin_step: u64, photons: impl Iterator<Item=u64>) {
     use std::collections::VecDeque;
     let max_time = bins.len() as u64 * bin_step;
@@ -366,6 +509,18 @@ struct Opt {
     /// Auto correlate, takes output file as argument ('-' for stdout)
     #[structopt(short = "a", long = "auto-correlate")]
     auto_correlate: Option<PathBuf>,
+    /// Run an approximate cross correlation routine, takes output file as argument ('-' for stdout)
+    ///
+    /// The output timestamps are the center of each bin. The approximation is that a photon pair
+    /// with time difference d, with bins t(n) < d < t(n+1) on each side of it, falls into bin
+    /// t(n) with probability (t(n+1) - d)/(t(n+1) - t(n)), otherwise it falls into bin t(n+1).
+    ///
+    /// The runtime of this method is O(num_photons + "duration file" * num_timestep^2 / cor_time).
+    /// On the sample file this is being developed on duration file is ~12 million times num_photons,
+    /// so the determining factor is the second expression. As such it is suited for long correlations
+    /// with few timesteps.
+    #[structopt(long = "approx-cross-correlate")]
+    approximate_cross_correlate: Option<PathBuf>,
     /// Print header and number of photons, takes output file as argument ('-' for stdout)
     #[structopt(short = "m", long = "metadata")]
     metadata: Option<PathBuf>,
@@ -517,7 +672,7 @@ fn main() {
 
             if let Some(path) = &opt.auto_correlate {
                 let mut auto_output = get_output(&path);
-                let photons = photons.clone(); 
+                let photons = photons.clone();
                 let opt = opt.clone();
                 thread_handles.push(
                     thread::spawn(move || {
@@ -537,40 +692,75 @@ fn main() {
 
             if let Some(path) = &opt.cross_correlate {
                 let mut cross_output = get_output(&path);
+                let photons = photons.clone();
+                let opt = opt.clone();
 
-                let mut bins_forward: Vec<u64> = vec![0; opt.num_timestep];
-                let mut bins_backwards: Vec<u64> = vec![0; opt.num_timestep];
+                thread_handles.push(
+                    thread::spawn(move || {
 
-                if !opt.sequential {
-                    parallel_asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons.clone(), first_photon)
-                }
-                else {
-                    asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons.clone(), first_photon)
-                }
+                        let mut bins_forward: Vec<u64> = vec![0; opt.num_timestep];
+                        let mut bins_backwards: Vec<u64> = vec![0; opt.num_timestep];
 
-                let mut bin_start: i64 = - (bin_size as i64 * opt.num_timestep as i64);
-                for &b in bins_backwards.iter().rev() {
-                    writeln!(cross_output, "{} {}", bin_start, b).unwrap();
+                        if !opt.sequential {
+                            parallel_asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons.clone(), first_photon)
+                        }
+                        else {
+                            asymmetric_cross_correlation(&mut bins_forward, &mut bins_backwards, bin_size, photons.clone(), first_photon)
+                        }
+
+                        let mut bin_start: i64 = - (bin_size as i64 * opt.num_timestep as i64);
+                        for &b in bins_backwards.iter().rev() {
+                            writeln!(cross_output, "{} {}", bin_start, b).unwrap();
+                            bin_start += bin_size as i64;
+                        }
+
+                        assert_eq!(bin_start, 0);
+
+                        for &b in &bins_forward[..] {
+                            writeln!(cross_output, "{} {}", bin_start, b).unwrap();
+                            bin_start += bin_size as i64;
+                        }
+
+
+
+                        if opt.validate_correlation {
+                            let mut bins: Vec<u64> = vec![0; opt.num_timestep];
+                            symmetric_cross_correlation(&mut bins, bin_size, photons.clone(), first_photon);
+                            for i in 0.. opt.num_timestep {
+                                // Note: This *will* fail if there are two simultaneous photons, because they
+                                // are currently double counted. I'll consider that a feature for now.
+                                assert_eq!(bins[i], bins_forward[i] + bins_backwards[i]);
+                            }
+                        }
+                    })
+                );
+            }
+
+            if let Some(path) = &opt.approximate_cross_correlate {
+                let mut approx_cross_output = get_output(&path);
+
+                let (bins_backwards, bins_forwards) = approximate_asymmetric_cross_correlation(opt.num_timestep as u64 , bin_size, photons.clone(), first_photon);
+                let mut bin_start: i64 = - (bin_size as i64 * bins_backwards.len() as i64);
+                for &b in &bins_backwards {
+                    writeln!(approx_cross_output, "{} {}", bin_start, b).unwrap();
                     bin_start += bin_size as i64;
                 }
 
                 assert_eq!(bin_start, 0);
 
-                for &b in &bins_forward[..] {
-                    writeln!(cross_output, "{} {}", bin_start, b).unwrap();
+                for &b in &bins_forwards {
+                    writeln!(approx_cross_output, "{} {}", bin_start, b).unwrap();
                     bin_start += bin_size as i64;
                 }
 
 
-
                 if opt.validate_correlation {
-                    let mut bins: Vec<u64> = vec![0; opt.num_timestep];
-                    symmetric_cross_correlation(&mut bins, bin_size, photons, first_photon);
-                    for i in 0.. opt.num_timestep {
-                        // Note: This *will* fail if there are two simultaneous photons, because they
-                        // are currently double counted. I'll consider that a feature for now.
-                        assert_eq!(bins[i], bins_forward[i] + bins_backwards[i]);
-                    } 
+                    let bins = approximate_symmetric_cross_correlation(opt.num_timestep as u64, bin_size, photons.clone(), first_photon);
+                    assert_eq!(bins[0], bins_forwards[0]);
+                    let back_len = bins_backwards.len();
+                    for i in 1.. opt.num_timestep {
+                        assert_eq!(bins[i], bins_forwards[i] + bins_backwards[back_len - i]);
+                    }
                 }
             }
         }
