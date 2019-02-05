@@ -530,24 +530,24 @@ struct Opt {
     input: PathBuf,
 
     /// Number of timesteps to cross correlate over.
-    #[structopt(short = "n", long = "num_timestep", default_value = "1000")]
+    #[structopt(short = "n", long = "num_timestep", default_value = "1000",  parse(try_from_str = "parse_usize"))]
     num_timestep: usize,
     /// Length of each timestep.
-    #[structopt(short = "T", long = "cor_time", default_value = "10000000")]
+    #[structopt(short = "T", long = "cor_time", default_value = "10000000", parse(try_from_str = "parse_u64"))]
     cor_time: u64,
 
     /// Truncate file to this number of photons
-    #[structopt(long="num_photons")]
+    #[structopt(long="num_photons",  parse(try_from_str = "parse_usize"))]
     num_photons: Option<usize>,
     /// Start Time
-    #[structopt(short = "s", long="start_time", default_value = "0")]
+    #[structopt(short = "s", long="start_time", default_value = "0", parse(try_from_str = "parse_u64"))]
     start_time: u64,
     /// End Time
-    #[structopt(short = "e", long="end_time")]
+    #[structopt(short = "e", long="end_time", parse(try_from_str = "parse_u64"))]
     end_time: Option<u64>,
 
     /// Print progress every n photons.
-    #[structopt(long = "progress")]
+    #[structopt(long = "progress", parse(try_from_str = "parse_u64"))]
     progress: Option<u64>,
 
     /// Don't run in parallel
@@ -570,6 +570,52 @@ fn get_output(path: &PathBuf) -> Box<Write + Send> {
     else {
         Box::new(File::create(path).expect("Output file doesn't exist"))
     }
+}
+
+fn parse_u64(text: &str) -> Result<u64, std::num::ParseIntError> {
+    use std::str::FromStr;
+
+    // Try and parse as a bare int
+    let r = u64::from_str(text);
+    if r.is_ok() { return r };
+
+    // Try and parse as scientific notation
+    // TODO: Support '.'
+    if let Some(idx) =  text.find('e') {
+        let (prefix, suffix) = text.split_at(idx);
+        let suffix = &suffix[1..];
+
+        let r_mult = u64::from_str(prefix)?;
+        let r_exp = u32::from_str(suffix)?;
+
+        return Ok(r_mult * (10_u64.pow(r_exp)));
+    }
+
+    // If not scientific notation, return the original error
+    r
+}
+
+fn parse_usize(text: &str) -> Result<usize, std::num::ParseIntError> {
+    use std::str::FromStr;
+
+    // Try and parse as a bare int
+    let r = usize::from_str(text);
+    if r.is_ok() { return r };
+
+    // Try and parse as scientific notation
+    // TODO: Support '.'
+    if let Some(idx) =  text.find('e') {
+        let (prefix, suffix) = text.split_at(idx);
+        let suffix = &suffix[1..];
+
+        let r_mult = usize::from_str(prefix)?;
+        let r_exp = u32::from_str(suffix)?;
+
+        return Ok(r_mult * (10_usize.pow(r_exp)));
+    }
+
+    // If not scientific notation, return the original error
+    r
 }
 
 fn static_ref<T>(v: T) -> &'static T {
