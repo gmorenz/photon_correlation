@@ -98,10 +98,10 @@ impl <'a> Iterator for FastPhotonIter<'a> {
     fn next(&mut self) -> Option<(u64, bool)> {
         const T2WRAPAROUND_V2: u64 = 33554432;
 
-        if self.data.len() == 0 { return None; }
-
         // TODO: Check these both get optimized properly (they aren't).
         loop {
+            if self.data.len() == 0 { return None; }
+
             let val = self.data[0];
             self.data = &self.data[1..];
 
