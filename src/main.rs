@@ -560,6 +560,10 @@ struct Opt {
     /// and make sure they get the same output (slow).
     #[structopt(long="validate-correlation")]
     validate_correlation: bool,
+
+    /// File format is a a newline seperated list of "channel,picosecond" pairs.
+    #[structopt(long="csv-file")]
+    csv_file: bool,
 }
 
 fn get_output(path: &PathBuf) -> Box<Write + Send> {
@@ -625,21 +629,46 @@ fn static_ref<T>(v: T) -> &'static T {
     r
 }
 
-fn main() {
-    let opt = Opt::from_args();
-    let mut thread_handles = vec![];
+fn photons_csv(opt: &Opt) -> impl Iterator<Item=(u64, bool)> + Clone + Send + 'static {
+    // TODO: Implement validating file.
+    use std::io::{BufReader, BufRead};
+    let f = BufReader::new(File::open(&opt.input).unwrap());
+    f.lines()
+         // Convert each line to (time, channel) pair
+        .map(move |line| {
+            let line = line.unwrap();
+            let comma = line.find(',').unwrap();
+            let (channel, mut time) = line.split_at(comma);
+            time = &time[1..]; // Strip comma
 
+            // Convert channel to bool
+            let channel = match channel {
+                "0" => false,
+                "1" => true,
+                _ => panic!("Bad channel {}", channel),
+            };
+
+            // Convert time to integer
+            let time = time.parse::<u64>().unwrap();
+            (time, channel)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+fn photons_device(opt: &Opt) -> impl Iterator<Item=(u64, bool)> + Clone + Send + 'static {
     let file = std::fs::File::open(&opt.input).unwrap();
     let mmap = unsafe { memmap::MmapOptions::new().map(&file).unwrap() };
     let mmap = static_ref(mmap);
     let (i, header) = strip_remaining_from_err(header::parse(&mmap)).unwrap();
 
+    // TODO: Re-thread this.
     if opt.validate_file {
-        thread_handles.push(
-            thread::spawn(move || {
+        // thread_handles.push(
+            // thread::spawn(move || {
                 validate_file(i);
-            })
-        );
+            // })
+        // );
     }
 
     let num_records: i64 = header[&(b"TTResult_NumberOfRecords\0\0\0\0\0\0\0\0", -1)].int();
@@ -653,7 +682,11 @@ fn main() {
     let record_type = header[&(b"TTResultFormat_TTTRRecType\0\0\0\0\0\0", -1)];
     assert_eq!(record_type.int(), 0x1010204, "We only parse HydraHarpT2 files for now");
 
-    let mut photons = FastPhotonIter::new(i);
+    FastPhotonIter::new(i)
+}
+
+fn run_algorithms(opt: Opt, mut photons: impl Iterator<Item=(u64, bool)> + Clone + Send + 'static) {
+    let mut thread_handles = vec![];
 
     // Skip photons until the start time.
     while photons.clone().next().expect("No photons after start time").0 < opt.start_time {
@@ -703,7 +736,8 @@ fn main() {
                 let photons = photons.clone();
                 thread_handles.push(
                     thread::spawn(move || {
-                        header::write_header(&mut *meta_output, header);
+                        // TODO: Reimplement writing headers
+                        // header::write_header(&mut *meta_output, header);
                         let mut count: u64 = 0;
                         let mut last: u64 = 0;
                         for (photon, _) in photons {
@@ -814,5 +848,18 @@ fn main() {
 
     for handle in thread_handles {
         handle.join().unwrap();
+    }
+}
+
+fn main() {
+    let opt = Opt::from_args();
+
+    if !opt.csv_file {
+        let photons = photons_device(&opt);
+        run_algorithms(opt, photons);
+    }
+    else {
+        let photons = photons_csv(&opt);
+        run_algorithms(opt, photons);
     }
 }
